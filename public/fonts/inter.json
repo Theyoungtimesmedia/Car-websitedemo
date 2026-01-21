@@ -1,0 +1,26 @@
+{
+  "glyphs": {
+    "a": { "x_min": 0, "x_max": 10, "ha": 12, "o": "m 5,0 l 5,10 l 0,10 l 0,0 z" },
+    "n": { "x_min": 0, "x_max": 10, "ha": 12, "o": "m 0,0 l 0,10 l 2,10 l 2,3 l 8,3 l 8,10 l 10,10 l 10,0 l 8,0 l 8,7 l 2,7 l 2,0 z" },
+    "r": { "x_min": 0, "x_max": 8, "ha": 10, "o": "m 0,0 l 0,10 l 2,10 l 2,6 l 6,6 l 6,10 l 8,10 l 8,6 l 6,6 l 6,4 l 2,4 l 2,0 z" },
+    "i": { "x_min": 0, "x_max": 2, "ha": 4, "o": "m 0,0 l 0,10 l 2,10 l 2,0 z" }
+  },
+  "familyName": "Inter",
+  "ascender": 10,
+  "descender": 0,
+  "underlinePosition": -1,
+  "underlineThickness": 1,
+  "boundingBox": {
+    "yMin": 0,
+    "yMax": 10,
+    "xMin": 0,
+    "xMax": 10
+  },
+  "resolution": 1000,
+  "original_font_information": {
+    "format": 0,
+    "copyright": "Inter Font",
+    "fontFamily": "Inter",
+    "fontSubfamily": "Regular"
+  }
+}
