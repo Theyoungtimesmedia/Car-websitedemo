@@ -23,7 +23,7 @@ const PaymentModalNEKpay = ({
   const [paymentStatus, setPaymentStatus] = useState('idle');
   const [errorMessage, setErrorMessage] = useState('');
   const [checkAttempts, setCheckAttempts] = useState(0);
-  const [saveStatus, setSaveStatus] = useState(''); // NEW: Track save status
+  const [saveStatus, setSaveStatus] = useState('');
 
   const [paymentForm, setPaymentForm] = useState({
     currency: 'USD',
@@ -74,7 +74,7 @@ const PaymentModalNEKpay = ({
     try {
       const orderNo = generateOrderNo();
 
-      console.log('📤 Creating payment with order:', orderNo);
+      console.log('📤 Creating NEKpay payment order:', orderNo);
 
       const response = await fetch(`${API_BASE_URL}/api/nekpay/create-payment`, {
         method: 'POST',
@@ -92,11 +92,12 @@ const PaymentModalNEKpay = ({
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
       const data = await response.json();
-      console.log('📥 Payment response:', data);
+      console.log('📥 NEKpay response:', data);
 
       if (data.code === 0 && data.data) {
         const completeOrderInfo = {
@@ -109,27 +110,29 @@ const PaymentModalNEKpay = ({
           payUrl: data.data.payUrl || null
         };
         
-        console.log('💾 Storing order info:', completeOrderInfo);
+        console.log('💾 Order info:', completeOrderInfo);
         setOrderInfo(completeOrderInfo);
         setPaymentStatus('pending');
         
         if (completeOrderInfo.payUrl) {
+          // Open payment window
           const paymentWindow = window.open(
             completeOrderInfo.payUrl, 
             'nekpay_payment', 
-            'width=800,height=700,scrollbars=yes,resizable=yes,location=yes'
+            'width=800,height=700,scrollbars=yes,resizable=yes,location=yes,status=yes,menubar=no,toolbar=no'
           );
           
           if (paymentWindow) {
             setPaymentStatus('checking');
+            // Start checking payment status after 5 seconds
             setTimeout(() => {
               checkPaymentStatus(orderNo);
-            }, 3000);
+            }, 5000);
           } else {
-            setErrorMessage('Popup blocked! Please allow popups and try again, or click the link below.');
+            setErrorMessage('Popup blocked! Please allow popups for this site, or click the link below to pay manually.');
           }
         } else {
-          throw new Error('No payment URL received from gateway');
+          throw new Error('No payment URL received from NEKpay. Please try again.');
         }
       } else {
         throw new Error(data.msg || 'Payment creation failed');
@@ -138,8 +141,8 @@ const PaymentModalNEKpay = ({
       console.error('❌ Payment error:', err);
       setPaymentStatus('failed');
       
-      if (err.message.includes('fetch')) {
-        setErrorMessage(`Cannot connect to payment server. Make sure the backend is running on ${API_BASE_URL}`);
+      if (err.message.includes('fetch') || err.message.includes('NetworkError')) {
+        setErrorMessage(`Cannot connect to payment server. Please ensure the backend is running on ${API_BASE_URL}`);
       } else {
         setErrorMessage(err.message || 'Payment request failed. Please try again.');
       }
@@ -149,41 +152,50 @@ const PaymentModalNEKpay = ({
   };
 
   const checkPaymentStatus = async (mchOrderNo, attempt = 0) => {
-    const MAX_ATTEMPTS = 20;
-    const INTERVAL_MS = 6000;
+    const MAX_ATTEMPTS = 30; // Check for up to 3 minutes
+    const INTERVAL_MS = 6000; // Every 6 seconds
 
     if (attempt >= MAX_ATTEMPTS) {
-      setPaymentStatus('failed');
-      setErrorMessage(`Payment verification timeout. If you completed the payment, please contact support with Order ID: ${mchOrderNo}`);
+      setPaymentStatus('timeout');
+      setErrorMessage(
+        `Payment verification timeout after ${Math.floor(MAX_ATTEMPTS * INTERVAL_MS / 1000 / 60)} minutes. ` +
+        `If you completed the payment, it will be verified automatically. ` +
+        `Order ID: ${mchOrderNo}`
+      );
       return;
     }
 
     setCheckAttempts(attempt + 1);
 
     try {
+      console.log(`🔍 Checking payment status (attempt ${attempt + 1}/${MAX_ATTEMPTS})...`);
+      
       const response = await fetch(`${API_BASE_URL}/api/nekpay/query-order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mchOrderNo })
       });
 
-      if (!response.ok) throw new Error('Query request failed');
+      if (!response.ok) {
+        throw new Error('Query request failed');
+      }
 
       const data = await response.json();
       
       if (data.code === 0 && data.data) {
         const state = data.data.state;
         
+        // state: 0 = pending, 2 = success, 3 = failed
         if (state === 2) {
           console.log('✅ Payment verified as successful!');
           setPaymentStatus('success');
           
-          // Create complete payment data with ALL fields defined
+          // Prepare complete payment data
           const completePaymentData = {
             // Order identifiers
             mchOrderNo: String(data.data.mchOrderNo || mchOrderNo),
             payOrderId: String(data.data.payOrderId || ''),
-            platformOrderNo: String(data.data.payOrderId || data.data.platformOrderNo || ''),
+            platformOrderNo: String(data.data.payOrderId || ''),
             
             // Payment details
             state: Number(data.data.state),
@@ -218,16 +230,17 @@ const PaymentModalNEKpay = ({
             console.error('⚠️ Found undefined value:', hasUndefined);
           }
           
-          // Call the success handler
+          // Save payment data
           if (onPaymentSuccess) {
             setSaveStatus('saving');
-            console.log('💾 Calling onPaymentSuccess handler...');
+            console.log('💾 Saving payment data...');
             
             try {
               await onPaymentSuccess(completePaymentData);
               setSaveStatus('saved');
-              console.log('✅ Payment data saved successfully!');
+              console.log('✅ Payment saved successfully!');
               
+              // Close modal after 3 seconds
               setTimeout(() => { 
                 onClose(); 
                 resetForm(); 
@@ -247,24 +260,31 @@ const PaymentModalNEKpay = ({
           
           return;
         } else if (state === 3) {
+          console.log('❌ Payment failed or cancelled');
           setPaymentStatus('failed');
-          setErrorMessage('Payment failed or was cancelled. Please try again.');
+          setErrorMessage('Payment was cancelled or failed. Please try again.');
           return;
         }
         
+        // Still pending, check again
+        console.log('⏳ Payment still pending, will check again...');
         setTimeout(() => checkPaymentStatus(mchOrderNo, attempt + 1), INTERVAL_MS);
       } else {
+        // No data, retry
         setTimeout(() => checkPaymentStatus(mchOrderNo, attempt + 1), INTERVAL_MS);
       }
     } catch (err) {
       console.error('Query error:', err);
+      // Continue checking despite error
       setTimeout(() => checkPaymentStatus(mchOrderNo, attempt + 1), INTERVAL_MS);
     }
   };
 
   const handleClose = () => {
     if (paymentStatus === 'checking') {
-      const confirm = window.confirm('Payment verification is in progress. Are you sure you want to close?');
+      const confirm = window.confirm(
+        'Payment verification is in progress. If you close now, your payment will still be processed but you may need to check your email for confirmation.\n\nAre you sure you want to close?'
+      );
       if (!confirm) return;
     }
     onClose();
@@ -274,7 +294,8 @@ const PaymentModalNEKpay = ({
   const getStatusIcon = () => {
     switch (paymentStatus) {
       case 'success': return <CheckCircle className="h-5 w-5 text-green-600" />;
-      case 'failed': return <XCircle className="h-5 w-5 text-red-600" />;
+      case 'failed': 
+      case 'timeout': return <XCircle className="h-5 w-5 text-red-600" />;
       default: return <AlertCircle className="h-5 w-5" />;
     }
   };
@@ -287,9 +308,10 @@ const PaymentModalNEKpay = ({
     switch (paymentStatus) {
       case 'creating': return '🔄 Creating payment order...';
       case 'pending': return '🌐 Opening payment window...';
-      case 'checking': return `⏳ Verifying payment... (${checkAttempts}/20)`;
-      case 'success': return '✅ Payment successful!';
+      case 'checking': return `⏳ Verifying payment... (${checkAttempts}/30)`;
+      case 'success': return '✅ Payment verified successfully!';
       case 'failed': return '❌ Payment failed';
+      case 'timeout': return '⏱️ Verification timeout - payment may still be processing';
       default: return '';
     }
   };
@@ -300,6 +322,7 @@ const PaymentModalNEKpay = ({
     switch (paymentStatus) {
       case 'success': return 'border-green-500 bg-green-50 text-green-900';
       case 'failed': return 'border-red-500 bg-red-50 text-red-900';
+      case 'timeout': return 'border-orange-500 bg-orange-50 text-orange-900';
       default: return 'border-blue-500 bg-blue-50 text-blue-900';
     }
   };
@@ -312,7 +335,7 @@ const PaymentModalNEKpay = ({
             <Button variant="ghost" size="icon" onClick={handleClose} disabled={loading}>
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            Secure Payment
+            Secure Payment - NEKpay
           </DialogTitle>
         </DialogHeader>
 
@@ -441,16 +464,16 @@ const PaymentModalNEKpay = ({
              `Pay ${formatUSD(plan.deposit_usd)}`}
           </Button>
 
-          {orderInfo?.payUrl && paymentStatus === 'pending' && (
-            <div className="text-center">
-              <p className="text-xs text-muted-foreground mb-2">Popup blocked?</p>
+          {orderInfo?.payUrl && (paymentStatus === 'pending' || paymentStatus === 'checking') && (
+            <div className="text-center p-4 bg-blue-50 rounded-lg border border-blue-200">
+              <p className="text-xs text-blue-800 font-medium mb-2">Popup blocked or need to retry?</p>
               <a 
                 href={orderInfo.payUrl} 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:underline"
+                className="text-sm text-blue-600 hover:text-blue-800 underline font-medium"
               >
-                Click here to open payment page manually
+                Click here to open payment page
               </a>
             </div>
           )}

@@ -1,4 +1,4 @@
-// File: server.js - NEKpay Payment Gateway Integration (FIXED)
+// File: server.js - NEKpay Payment Gateway Integration (Official Implementation)
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
@@ -6,254 +6,280 @@ import crypto from 'crypto';
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ============================================
 // CONFIGURATION
 // ============================================
 const CONFIG = {
-  TEST_MODE: false, // IMPORTANT: Set to false ONLY when you have real NEKpay credentials
-  
-  NEKPAY_MERCHANT_ID: process.env.NEKPAY_MERCHANT_ID || '300567123',
-  NEKPAY_API_KEY: process.env.NEKPAY_API_KEY || 'ag278KNH!@',
-  NEKPAY_SECRET_KEY: process.env.NEKPAY_SECRET_KEY || '7d6d92745ebc4a3882bd3e854a15254a',
-  
-  // FIXED: Correct NEKpay URLs
-  NEKPAY_BASE_URL: process.env.NEKPAY_BASE_URL || 'https://api.nekpayment.com',
+  // NEKpay Credentials (Replace with your official credentials)
+  NEKPAY_MERCHANT_ID: process.env.NEKPAY_MERCHANT_ID || '999300111', // Test merchant number from docs
+  NEKPAY_SECRET_KEY: process.env.NEKPAY_SECRET_KEY || 'e8a4cdd0ccdb4d2b9ca6212453c5e40c', // Test key from docs
+  NEKPAY_PAY_TYPE: process.env.NEKPAY_PAY_TYPE || '520', // Nigeria Category II A
+
+  // NEKpay API Endpoints (From official documentation)
+  NEKPAY_BASE_URL: 'https://api.nekpayment.com',
   NEKPAY_CREATE_ORDER_ENDPOINT: '/pay/web',
   NEKPAY_QUERY_ORDER_ENDPOINT: '/query/order',
-  NEKPAY_TRANSFER_ENDPOINT: '/pay/transfer',
-  NEKPAY_QUERY_TRANSFER_ENDPOINT: '/query/transfer',
-  NEKPAY_QUERY_BALANCE_ENDPOINT: '/query/balance',
-  
-  SERVER_URL: process.env.SERVER_URL || 'http://localhost:3001',
-  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000'
+
+  // Server configuration
+  SERVER_URL: process.env.SERVER_URL || 'https://fallon-zincy-derek.ngrok-free.dev',
+  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
+
+  // ============================================
+  // FX RATE: USD → NGN
+  // NEKpay expects amounts in Naira.
+  // Update this rate regularly or swap in a live FX API call.
+  // ============================================
+  USD_TO_NGN_RATE: parseFloat(process.env.USD_TO_NGN_RATE) || 1600,
+
+  // NEKpay order limits (in NGN)
+  NEKPAY_MIN_AMOUNT_NGN: 500,
+  NEKPAY_MAX_AMOUNT_NGN: 10000
 };
 
 // ============================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS (Following NEKpay Docs)
 // ============================================
+
+/**
+ * Generate MD5 signature following NEKpay specification
+ * Format: param1=value1&param2=value2&...&key=secretKey
+ * Then MD5 hash and convert to lowercase (as per examples in docs)
+ */
 function generateSignature(params, secretKey) {
   try {
-    // Remove sign field if present
+    // Remove sign and sign_type fields
     const signParams = { ...params };
     delete signParams.sign;
-    
+    delete signParams.sign_type;
+
     // Sort keys alphabetically
     const sortedKeys = Object.keys(signParams).sort();
-    
-    // Create sign string: key1=value1&key2=value2&key=secretKey
+
+    // Create signature string
     const signStr = sortedKeys
       .map(key => `${key}=${signParams[key]}`)
       .join('&') + `&key=${secretKey}`;
-    
-    // Generate MD5 hash and convert to uppercase
+
+    console.log('📝 Signature string:', signStr);
+
+    // Generate MD5 hash (lowercase as per docs examples)
     const signature = crypto
       .createHash('md5')
       .update(signStr)
       .digest('hex')
-      .toUpperCase();
-    
+      .toLowerCase();
+
     return signature;
   } catch (error) {
     console.error('Signature generation error:', error);
-    return '';
+    throw error;
   }
 }
 
+/**
+ * Verify signature from NEKpay response
+ */
 function verifySignature(params, receivedSignature, secretKey) {
   try {
     const calculatedSignature = generateSignature(params, secretKey);
-    return calculatedSignature === receivedSignature;
+    const isValid = calculatedSignature === receivedSignature.toLowerCase();
+
+    if (!isValid) {
+      console.log('❌ Signature mismatch:');
+      console.log('   Expected:', calculatedSignature);
+      console.log('   Received:', receivedSignature.toLowerCase());
+    }
+
+    return isValid;
   } catch (error) {
     console.error('Signature verification error:', error);
     return false;
   }
 }
 
-async function nekpayRequest(endpoint, data) {
-  try {
-    const url = `${CONFIG.NEKPAY_BASE_URL}${endpoint}`;
-    
-    // Prepare request data with required fields
-    const requestData = {
-      ...data,
-      mchId: CONFIG.NEKPAY_MERCHANT_ID,
-      timestamp: Date.now().toString(),
-      nonce: crypto.randomBytes(16).toString('hex')
-    };
-    
-    // Generate signature
-    requestData.sign = generateSignature(requestData, CONFIG.NEKPAY_SECRET_KEY);
-    
-    console.log('NEKpay Request:', { 
-      url, 
-      data: { 
-        ...requestData, 
-        sign: requestData.sign.substring(0, 8) + '...' 
-      } 
-    });
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${CONFIG.NEKPAY_API_KEY}`
-      },
-      body: JSON.stringify(requestData)
-    });
-    
-    const responseText = await response.text();
-    console.log('NEKpay Raw Response:', responseText);
-    
-    if (!response.ok) {
-      throw new Error(`NEKpay API returned ${response.status}: ${response.statusText} - ${responseText}`);
-    }
-    
-    // Try to parse JSON response
-    let result;
-    try {
-      result = JSON.parse(responseText);
-    } catch (e) {
-      throw new Error(`Invalid JSON response: ${responseText}`);
-    }
-    
-    console.log('NEKpay Parsed Response:', result);
-    
-    return result;
-  } catch (error) {
-    console.error('NEKpay Request Error:', error);
-    throw error;
-  }
-}
+/**
+ * Format date according to NEKpay spec: yyyy-MM-dd HH:mm:ss
+ */
+function formatNEKpayDate(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
 
-// ============================================
-// TEST MODE SIMULATOR
-// ============================================
-const testOrdersDB = new Map();
-
-function simulateNEKpayResponse(type, data) {
-  try {
-    if (type === 'create') {
-      const order = {
-        mchOrderNo: data.mchOrderNo,
-        payOrderId: `NEK${Date.now()}${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-        state: 0,
-        amount: data.amount,
-        currency: data.currency,
-        createTime: new Date().toISOString()
-      };
-      
-      testOrdersDB.set(data.mchOrderNo, order);
-      
-      return {
-        code: 0,
-        msg: 'success',
-        data: {
-          ...order,
-          payUrl: `${CONFIG.SERVER_URL}/fake-payment?order=${data.mchOrderNo}&amount=${data.amount}`
-        }
-      };
-    }
-    
-    if (type === 'query') {
-      const order = testOrdersDB.get(data.mchOrderNo);
-      if (!order) {
-        return { code: -1, msg: 'Order not found' };
-      }
-      
-      // Auto-mark as success after 10 seconds
-      const orderAge = Date.now() - new Date(order.createTime).getTime();
-      if (orderAge > 10000) {
-        order.state = 2; // Mark as successful
-      }
-      
-      return {
-        code: 0,
-        msg: 'success',
-        data: order
-      };
-    }
-    
-    return { code: -1, msg: 'Invalid request' };
-  } catch (error) {
-    console.error('Simulator error:', error);
-    return { code: -1, msg: error.message };
-  }
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 // ============================================
 // API ENDPOINTS
 // ============================================
 
-// Create payment order
+/**
+ * Create payment order
+ * Frontend sends amounts in USD — we convert to NGN before hitting NEKpay.
+ */
 app.post('/api/nekpay/create-payment', async (req, res) => {
   try {
     const { orderNo, amount, currency = 'USD', subject, body, userEmail, userName, planId } = req.body;
-    
+
     // Validation
-    if (!orderNo || !amount || !userEmail) {
+    if (!orderNo || !amount) {
       return res.status(400).json({
         code: -1,
-        msg: 'Missing required fields: orderNo, amount, userEmail'
+        msg: 'Missing required fields: orderNo, amount'
       });
     }
-    
+
+    // ============================================
+    // USD → NGN CONVERSION
+    // NEKpay only accepts Naira and enforces a 500–10,000 NGN range.
+    // ============================================
+    const amountInUSD = parseFloat(amount);
+    const amountInNGN = parseFloat((amountInUSD * CONFIG.USD_TO_NGN_RATE).toFixed(2));
+
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📝 Creating Payment Order');
-    console.log('Order No:', orderNo);
-    console.log('Amount:', amount, currency);
-    console.log('User:', userName, '-', userEmail);
-    console.log('Plan ID:', planId);
-    
-    // TEST MODE
-    if (CONFIG.TEST_MODE) {
-      console.log('🧪 TEST MODE: Simulating payment');
-      const result = simulateNEKpayResponse('create', { 
-        mchOrderNo: orderNo, 
-        amount, 
-        currency, 
-        subject, 
-        body 
+    console.log('📝 Creating NEKpay Payment Order');
+    console.log('Order No:   ', orderNo);
+    console.log('Amount (USD):', amountInUSD);
+    console.log('Amount (NGN):', amountInNGN, `(rate: 1 USD = ${CONFIG.USD_TO_NGN_RATE} NGN)`);
+    console.log('User:        ', userName, '-', userEmail);
+
+    // Guard: make sure converted amount is within NEKpay's limits
+    if (amountInNGN < CONFIG.NEKPAY_MIN_AMOUNT_NGN || amountInNGN > CONFIG.NEKPAY_MAX_AMOUNT_NGN) {
+      console.log(`❌ ${amountInNGN} NGN is outside allowed range (${CONFIG.NEKPAY_MIN_AMOUNT_NGN}–${CONFIG.NEKPAY_MAX_AMOUNT_NGN} NGN)`);
+      return res.status(400).json({
+        code: -1,
+        msg: `Amount out of range. $${amountInUSD} USD converts to ${amountInNGN} NGN, but NEKpay requires ${CONFIG.NEKPAY_MIN_AMOUNT_NGN}–${CONFIG.NEKPAY_MAX_AMOUNT_NGN} NGN.`,
+        data: {
+          amountUSD: amountInUSD,
+          amountNGN: amountInNGN,
+          minNGN: CONFIG.NEKPAY_MIN_AMOUNT_NGN,
+          maxNGN: CONFIG.NEKPAY_MAX_AMOUNT_NGN,
+          // tell the frontend the valid USD range so it can display it
+          minUSD: parseFloat((CONFIG.NEKPAY_MIN_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2)),
+          maxUSD: parseFloat((CONFIG.NEKPAY_MAX_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2))
+        }
       });
-      console.log('✅ Test order created');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      return res.json(result);
     }
-    
-    // LIVE MODE
-    console.log('🚀 LIVE MODE: Creating real payment');
-    
-    // Check if credentials are configured
-    if (CONFIG.NEKPAY_MERCHANT_ID === '300567123' && CONFIG.NEKPAY_API_KEY === 'ag278KNH!@') {
-      console.log('⚠️  WARNING: Using default test credentials!');
-      console.log('   Replace with your real NEKpay credentials in production.');
+
+    // Prepare notify_url - use placeholder if localhost
+    let notifyUrl = `${CONFIG.SERVER_URL}/api/nekpay/notify`;
+
+    if (CONFIG.SERVER_URL.includes('localhost') || CONFIG.SERVER_URL.includes('127.0.0.1')) {
+      console.log('⚠️  WARNING: Using localhost for notify_url');
+      console.log('   NEKpay cannot reach localhost URLs for webhooks.');
+      console.log('   Use ngrok or deploy to get a public URL.');
+      console.log('   For now, using placeholder URL (webhooks won\'t work).\n');
+      notifyUrl = 'https://example.com/webhook/placeholder';
     }
-    
-    // Prepare NEKpay request data
-    const nekpayData = {
-      mchOrderNo: orderNo,
-      amount: Math.round(parseFloat(amount) * 100), // Convert to cents
-      currency: currency,
-      subject: subject || 'Investment Plan',
-      body: body || `Payment for ${subject || 'Investment Plan'}`,
-      notifyUrl: `${CONFIG.SERVER_URL}/api/nekpay/notify`,
-      returnUrl: `${CONFIG.FRONTEND_URL}/payment-success`,
-      // Optional fields (if supported by NEKpay)
-      email: userEmail,
-      userName: userName
+
+    // Prepare request parameters following NEKpay documentation
+    // trade_amount is now in NGN
+    const requestParams = {
+      version: '1.0',
+      mch_id: CONFIG.NEKPAY_MERCHANT_ID,
+      notify_url: notifyUrl,
+      page_url: `${CONFIG.FRONTEND_URL}/payment-success`,
+      mch_order_no: orderNo,
+      pay_type: CONFIG.NEKPAY_PAY_TYPE,
+      trade_amount: amountInNGN.toFixed(2),   // ← NGN, not USD
+      order_date: formatNEKpayDate(),
+      bank_code: 'NGR044',
+      goods_name: subject || 'Investment Plan'
     };
-    
-    const result = await nekpayRequest(CONFIG.NEKPAY_CREATE_ORDER_ENDPOINT, nekpayData);
-    
-    console.log('✅ NEKpay order created');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    
-    res.json(result);
-    
+
+    // Add mch_return_msg only if planId exists (it's optional)
+    if (planId) {
+      requestParams.mch_return_msg = String(planId);
+    }
+
+    // Generate signature (without sign_type and sign)
+    const signature = generateSignature(requestParams, CONFIG.NEKPAY_SECRET_KEY);
+
+    // Add sign_type and sign AFTER signature generation
+    requestParams.sign_type = 'MD5';
+    requestParams.sign = signature;
+
+    console.log('📤 Request params:', {
+      ...requestParams,
+      sign: requestParams.sign.substring(0, 10) + '...',
+      ...(requestParams.mch_return_msg
+        ? { mch_return_msg: requestParams.mch_return_msg.substring(0, 50) + '...' }
+        : {})
+    });
+
+    console.log('🔐 Signature details:');
+    console.log('   Parameters used:', Object.keys(requestParams).filter(k => k !== 'sign' && k !== 'sign_type').sort().join(', '));
+    console.log('   Full signature:', signature);
+
+    // Make request to NEKpay (POST form data, not JSON)
+    const formBody = Object.keys(requestParams)
+      .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(requestParams[key]))
+      .join('&');
+
+    const url = `${CONFIG.NEKPAY_BASE_URL}${CONFIG.NEKPAY_CREATE_ORDER_ENDPOINT}`;
+
+    console.log('🌐 Sending to:', url);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: formBody
+    });
+
+    const responseText = await response.text();
+    console.log('📥 Raw response:', responseText);
+
+    if (!response.ok) {
+      throw new Error(`NEKpay API returned ${response.status}: ${responseText}`);
+    }
+
+    // Parse JSON response
+    let result;
+    try {
+      result = JSON.parse(responseText);
+    } catch (e) {
+      throw new Error(`Invalid JSON response: ${responseText}`);
+    }
+
+    console.log('📋 Parsed response:', result);
+
+    // Check if response is successful
+    if (result.respCode === 'SUCCESS' && result.tradeResult === '1') {
+      console.log('✅ Payment order created successfully');
+      console.log('   Platform Order No:', result.orderNo);
+      console.log('   Payment URL:', result.payInfo);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+      // Return standardized response — include both USD and NGN so the frontend knows
+      return res.json({
+        code: 0,
+        msg: 'success',
+        data: {
+          mchOrderNo: result.mchOrderNo,
+          payOrderId: result.orderNo,
+          state: 0, // 0 = created, waiting for payment
+          amountUSD: amountInUSD,
+          amountNGN: amountInNGN,
+          currency: currency,
+          fxRate: CONFIG.USD_TO_NGN_RATE,
+          createTime: result.orderDate,
+          payUrl: result.payInfo
+        }
+      });
+    } else {
+      throw new Error(result.tradeMsg || 'Payment creation failed');
+    }
+
   } catch (error) {
     console.error('❌ Create payment error:', error);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    
+
     res.status(500).json({
       code: -1,
       msg: error.message || 'Payment creation failed',
@@ -262,128 +288,214 @@ app.post('/api/nekpay/create-payment', async (req, res) => {
   }
 });
 
-// Query order status
+/**
+ * Query order status
+ */
 app.post('/api/nekpay/query-order', async (req, res) => {
   try {
     const { mchOrderNo, payOrderId } = req.body;
-    
+
     if (!mchOrderNo && !payOrderId) {
-      return res.status(400).json({ 
-        code: -1, 
-        msg: 'Missing mchOrderNo or payOrderId' 
+      return res.status(400).json({
+        code: -1,
+        msg: 'Missing mchOrderNo or payOrderId'
       });
     }
-    
+
     console.log(`🔍 Querying order: ${mchOrderNo || payOrderId}`);
-    
-    // TEST MODE
-    if (CONFIG.TEST_MODE) {
-      const result = simulateNEKpayResponse('query', { mchOrderNo });
-      console.log('   Status:', result.data?.state === 2 ? '✅ Success' : '⏳ Pending');
-      return res.json(result);
+
+    const requestParams = {
+      version: '1.0',
+      mch_id: CONFIG.NEKPAY_MERCHANT_ID,
+      mch_order_no: mchOrderNo
+    };
+
+    // Generate signature first
+    const signature = generateSignature(requestParams, CONFIG.NEKPAY_SECRET_KEY);
+
+    // Add sign_type and sign AFTER
+    requestParams.sign_type = 'MD5';
+    requestParams.sign = signature;
+
+    const formBody = Object.keys(requestParams)
+      .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(requestParams[key]))
+      .join('&');
+
+    const url = `${CONFIG.NEKPAY_BASE_URL}${CONFIG.NEKPAY_QUERY_ORDER_ENDPOINT}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: formBody
+    });
+
+    const responseText = await response.text();
+    let result;
+
+    try {
+      result = JSON.parse(responseText);
+    } catch (e) {
+      throw new Error(`Invalid JSON response: ${responseText}`);
     }
-    
-    // LIVE MODE
-    const queryData = {};
-    if (mchOrderNo) queryData.mchOrderNo = mchOrderNo;
-    if (payOrderId) queryData.payOrderId = payOrderId;
-    
-    const result = await nekpayRequest(CONFIG.NEKPAY_QUERY_ORDER_ENDPOINT, queryData);
-    console.log('   Status:', result.data?.state === 2 ? '✅ Success' : '⏳ Pending');
-    
-    res.json(result);
-    
+
+    // tradeResult: "1" = success
+    const state = result.tradeResult === '1' ? 2 : 0;
+
+    console.log('   Status:', state === 2 ? '✅ Success' : '⏳ Pending');
+
+    // Convert the NGN amount back to USD for the frontend
+    const amountNGN = parseFloat(result.tradeAmount || result.oriAmount || 0);
+    const amountUSD = parseFloat((amountNGN / CONFIG.USD_TO_NGN_RATE).toFixed(2));
+
+    res.json({
+      code: 0,
+      msg: 'success',
+      data: {
+        mchOrderNo: result.mchOrderNo,
+        payOrderId: result.orderNo,
+        state: state,
+        amountNGN: amountNGN,
+        amountUSD: amountUSD,
+        currency: 'USD',
+        fxRate: CONFIG.USD_TO_NGN_RATE,
+        createTime: result.orderDate,
+        paidTime: state === 2 ? new Date().toISOString() : null
+      }
+    });
+
   } catch (error) {
     console.error('❌ Query order error:', error);
-    res.status(500).json({ 
-      code: -1, 
+    res.status(500).json({
+      code: -1,
       msg: error.message || 'Query failed',
       error: process.env.NODE_ENV === 'development' ? error.toString() : undefined
     });
   }
 });
 
-// Payment notification callback
+/**
+ * Payment notification callback (Asynchronous notification)
+ * NEKpay will POST payment results here
+ */
 app.post('/api/nekpay/notify', async (req, res) => {
   try {
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔔 Payment Notification Received');
-    console.log('Data:', req.body);
-    
-    if (CONFIG.TEST_MODE) {
-      console.log('🧪 TEST MODE: Auto-approving notification');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      return res.send('SUCCESS');
+    console.log('Raw body:', req.body);
+
+    const {
+      tradeResult,
+      mchId,
+      mchOrderNo,
+      oriAmount,
+      amount,
+      orderDate,
+      orderNo,
+      merRetMsg,
+      sign,
+      signType
+    } = req.body;
+
+    // Prepare params for signature verification (excluding sign and signType)
+    const verifyParams = {
+      tradeResult,
+      mchId,
+      mchOrderNo,
+      oriAmount,
+      amount,
+      orderDate,
+      orderNo
+    };
+
+    // Only include merRetMsg if it was provided
+    if (merRetMsg) {
+      verifyParams.merRetMsg = merRetMsg;
     }
-    
-    const { sign, ...params } = req.body;
-    
+
     // Verify signature
-    if (!verifySignature(params, sign, CONFIG.NEKPAY_SECRET_KEY)) {
-      console.log('❌ Invalid signature');
-      console.log('   Expected:', generateSignature(params, CONFIG.NEKPAY_SECRET_KEY));
-      console.log('   Received:', sign);
+    const isValid = verifySignature(verifyParams, sign, CONFIG.NEKPAY_SECRET_KEY);
+
+    if (!isValid) {
+      console.log('❌ Invalid signature - rejecting notification');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      return res.status(400).send('FAIL');
+      return res.send('FAIL');
     }
-    
-    const { mchOrderNo, state, amount, currency, payOrderId } = params;
-    
-    if (state === 2) {
+
+    console.log('✅ Signature verified');
+
+    // Check payment status (tradeResult: "1" = success)
+    if (tradeResult === '1') {
+      // amount from NEKpay is in NGN — convert back to USD for your records
+      const paidNGN = parseFloat(amount);
+      const paidUSD = parseFloat((paidNGN / CONFIG.USD_TO_NGN_RATE).toFixed(2));
+
       console.log('✅ Payment successful');
-      console.log('   Order:', mchOrderNo);
-      console.log('   Pay Order ID:', payOrderId);
-      console.log('   Amount:', amount, currency);
-      
+      console.log('   Merchant Order:', mchOrderNo);
+      console.log('   Platform Order:', orderNo);
+      console.log('   Original Amount (NGN):', oriAmount);
+      console.log('   Paid Amount (NGN):     ', paidNGN);
+      console.log('   Paid Amount (USD):     ', paidUSD);
+      console.log('   Order Date:', orderDate);
+
+      if (merRetMsg) {
+        console.log('   Plan ID:', merRetMsg);
+      }
+
       // TODO: Update your database here
       // Example:
-      // await db.orders.update({ orderNo: mchOrderNo }, { 
-      //   status: 'paid',
-      //   payOrderId: payOrderId,
-      //   paidAt: new Date()
+      // const planId = merRetMsg;
+      // await db.payments.create({
+      //   mchOrderNo,
+      //   platformOrderNo: orderNo,
+      //   planId: planId,
+      //   amountNGN: paidNGN,
+      //   amountUSD: paidUSD,
+      //   status: 'completed',
+      //   paidAt: new Date(orderDate)
       // });
-      // await db.investments.create({ userId, planId, amount });
-      // await sendConfirmationEmail(userEmail, orderDetails);
-      
-      console.log('⚠️  TODO: Implement database update logic');
+      // await sendConfirmationEmail(userEmail, { mchOrderNo, amountUSD: paidUSD });
+
+      console.log('⚠️  TODO: Implement database update logic here');
     } else {
-      console.log('⏳ Payment pending or failed');
-      console.log('   State:', state);
+      console.log('⏳ Payment not successful');
+      console.log('   Status:', tradeResult);
     }
-    
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    
-    // NEKpay expects 'SUCCESS' response
-    res.send('SUCCESS');
-    
+
+    // IMPORTANT: NEKpay expects "success" response to stop retries
+    res.send('success');
+
   } catch (error) {
     console.error('❌ Notification error:', error);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    res.status(500).send('FAIL');
+    res.send('FAIL');
   }
 });
 
-// Fake payment page (TEST MODE only)
-app.get('/fake-payment', (req, res) => {
-  const { order, amount } = req.query;
-  
+/**
+ * Payment success page redirect
+ * This is where users land after completing payment (page_url)
+ */
+app.get('/payment-success', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>NEKpay Test Payment</title>
+      <title>Payment Successful</title>
       <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
           display: flex;
           justify-content: center;
           align-items: center;
           min-height: 100vh;
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          padding: 20px;
         }
         .container {
           background: white;
@@ -392,147 +504,70 @@ app.get('/fake-payment', (req, res) => {
           box-shadow: 0 20px 60px rgba(0,0,0,0.3);
           text-align: center;
           max-width: 500px;
-          width: 100%;
-          animation: slideIn 0.5s ease-out;
         }
-        @keyframes slideIn {
-          from { transform: translateY(-50px); opacity: 0; }
-          to { transform: translateY(0); opacity: 1; }
-        }
-        .logo { font-size: 48px; margin-bottom: 10px; }
-        h1 { color: #667eea; margin-bottom: 10px; font-size: 28px; }
-        .test-badge {
-          display: inline-block;
-          background: #fbbf24;
-          color: #78350f;
-          padding: 5px 15px;
-          border-radius: 20px;
-          font-size: 12px;
-          font-weight: bold;
-          margin-bottom: 30px;
-        }
-        .amount {
-          font-size: 56px;
-          font-weight: bold;
-          color: #1f2937;
-          margin: 30px 0;
-        }
-        .order-info {
-          background: #f3f4f6;
-          padding: 20px;
-          border-radius: 10px;
-          margin: 30px 0;
-        }
-        .order-label { color: #6b7280; font-size: 14px; margin-bottom: 5px; }
-        .order-value { color: #1f2937; font-size: 16px; font-family: monospace; word-break: break-all; }
+        .icon { font-size: 64px; margin-bottom: 20px; }
+        h1 { color: #10b981; margin-bottom: 10px; }
+        p { color: #6b7280; margin-bottom: 30px; }
         button {
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           color: white;
           border: none;
-          padding: 18px 50px;
-          font-size: 18px;
-          font-weight: 600;
+          padding: 15px 40px;
+          font-size: 16px;
           border-radius: 10px;
           cursor: pointer;
-          transition: all 0.3s;
-          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-          width: 100%;
         }
-        button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6); }
-        button:active { transform: translateY(0); }
-        .note {
-          margin-top: 30px;
-          padding: 20px;
-          background: #fef3c7;
-          border-left: 4px solid #f59e0b;
-          border-radius: 5px;
-          font-size: 14px;
-          color: #78350f;
-          text-align: left;
-        }
-        .note strong { display: block; margin-bottom: 10px; font-size: 16px; }
-        .note ul { margin-left: 20px; margin-top: 10px; }
-        .note li { margin-bottom: 5px; }
       </style>
     </head>
     <body>
       <div class="container">
-        <div class="logo">🧪</div>
-        <h1>NEKpay Test Payment</h1>
-        <div class="test-badge">TEST MODE</div>
-        
-        <div class="amount">$${amount}</div>
-        
-        <div class="order-info">
-          <div class="order-label">Order ID</div>
-          <div class="order-value">${order}</div>
-        </div>
-        
-        <button onclick="completePayment()">✓ Complete Test Payment</button>
-        
-        <div class="note">
-          <strong>⚠️ Test Mode Information</strong>
-          <ul>
-            <li>This is a simulated payment environment</li>
-            <li>No real money will be processed</li>
-            <li>Payment status updates automatically after 10 seconds</li>
-            <li>You can close this window after clicking the button</li>
-          </ul>
-        </div>
+        <div class="icon">✅</div>
+        <h1>Payment Successful!</h1>
+        <p>Your payment has been processed successfully. You can close this window now.</p>
+        <button onclick="window.close()">Close Window</button>
       </div>
-      
-      <script>
-        function completePayment() {
-          alert('✅ Test Payment Completed!\\n\\nOrder ID: ${order}\\n\\nYou can now close this window.\\nThe payment will be marked as successful in 10 seconds.');
-          window.close();
-        }
-      </script>
     </body>
     </html>
   `);
 });
 
-// Query balance (optional)
-app.post('/api/nekpay/query-balance', async (req, res) => {
-  try {
-    if (CONFIG.TEST_MODE) {
-      return res.json({
-        code: 0,
-        msg: 'success',
-        data: { balance: 1000000, currency: 'USD' }
-      });
-    }
-    
-    const result = await nekpayRequest(CONFIG.NEKPAY_QUERY_BALANCE_ENDPOINT, {});
-    res.json(result);
-    
-  } catch (error) {
-    console.error('❌ Query balance error:', error);
-    res.status(500).json({ code: -1, msg: error.message });
-  }
-});
-
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    mode: CONFIG.TEST_MODE ? 'test' : 'live',
+  res.json({
+    status: 'healthy',
+    mode: 'production',
     baseUrl: CONFIG.NEKPAY_BASE_URL,
-    timestamp: new Date().toISOString() 
+    merchantId: CONFIG.NEKPAY_MERCHANT_ID,
+    fxRate: CONFIG.USD_TO_NGN_RATE,
+    nekpayLimits: {
+      minNGN: CONFIG.NEKPAY_MIN_AMOUNT_NGN,
+      maxNGN: CONFIG.NEKPAY_MAX_AMOUNT_NGN,
+      minUSD: parseFloat((CONFIG.NEKPAY_MIN_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2)),
+      maxUSD: parseFloat((CONFIG.NEKPAY_MAX_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2))
+    },
+    timestamp: new Date().toISOString()
   });
 });
 
+// Configuration info
 app.get('/api/test', (req, res) => {
   res.json({
-    status: CONFIG.TEST_MODE ? '🧪 TEST MODE' : '🚀 PRODUCTION MODE',
+    status: '🚀 NEKpay Production',
     baseUrl: CONFIG.NEKPAY_BASE_URL,
+    merchantId: CONFIG.NEKPAY_MERCHANT_ID,
+    payType: CONFIG.NEKPAY_PAY_TYPE,
+    fxRate: CONFIG.USD_TO_NGN_RATE,
+    nekpayLimits: {
+      minNGN: CONFIG.NEKPAY_MIN_AMOUNT_NGN,
+      maxNGN: CONFIG.NEKPAY_MAX_AMOUNT_NGN,
+      minUSD: parseFloat((CONFIG.NEKPAY_MIN_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2)),
+      maxUSD: parseFloat((CONFIG.NEKPAY_MAX_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2))
+    },
     endpoints: {
       createOrder: CONFIG.NEKPAY_CREATE_ORDER_ENDPOINT,
       queryOrder: CONFIG.NEKPAY_QUERY_ORDER_ENDPOINT
     },
-    timestamp: new Date().toISOString(),
-    message: CONFIG.TEST_MODE ? 'Using simulated payments' : 'Using real NEKpay',
-    configured: CONFIG.NEKPAY_MERCHANT_ID !== 'YOUR_MERCHANT_ID'
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -554,39 +589,38 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.clear();
   console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log(`║   ${CONFIG.TEST_MODE ? '🧪 TEST MODE' : '🚀 LIVE MODE'} - NEKpay Backend Server            ║`);
+  console.log('║   🚀 NEKpay Backend Server - Production Mode        ║');
   console.log('╚═══════════════════════════════════════════════════════╝\n');
-  
+
   console.log(`📍 Server URL:    http://localhost:${PORT}`);
   console.log(`🌐 NEKpay URL:    ${CONFIG.NEKPAY_BASE_URL}`);
-  console.log(`✅ Health Check:  http://localhost:${PORT}/api/health`);
-  console.log(`🧪 Test Endpoint: http://localhost:${PORT}/api/test\n`);
-  
-  if (CONFIG.TEST_MODE) {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('⚠️  TEST MODE IS ACTIVE');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('   ✓ Payments will be simulated');
-    console.log('   ✓ No real money will be processed');
-    console.log('   ✓ Orders auto-complete after 10 seconds');
-    console.log('   ✓ Perfect for testing your frontend\n');
-    console.log('💡 To enable LIVE mode: Set TEST_MODE = false in line 14\n');
+  console.log(`🏪 Merchant ID:   ${CONFIG.NEKPAY_MERCHANT_ID}`);
+  console.log(`💳 Pay Type:      ${CONFIG.NEKPAY_PAY_TYPE} (Nigeria Category II A)`);
+  console.log(`💱 FX Rate:       1 USD = ${CONFIG.USD_TO_NGN_RATE} NGN`);
+  console.log(`📊 NEKpay Limits: ${CONFIG.NEKPAY_MIN_AMOUNT_NGN}–${CONFIG.NEKPAY_MAX_AMOUNT_NGN} NGN  (≈ $${(CONFIG.NEKPAY_MIN_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2)}–$${(CONFIG.NEKPAY_MAX_AMOUNT_NGN / CONFIG.USD_TO_NGN_RATE).toFixed(2)} USD)`);
+  console.log(`✅ Health Check:  http://localhost:${PORT}/api/health\n`);
+
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('📋 Configuration');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  if (CONFIG.NEKPAY_MERCHANT_ID === '999300111') {
+    console.log('⚠️  Using TEST merchant credentials from documentation');
+    console.log('   Replace with your official credentials for production:');
+    console.log('   - Set NEKPAY_MERCHANT_ID environment variable');
+    console.log('   - Set NEKPAY_SECRET_KEY environment variable');
+    console.log('   - Update NEKPAY_PAY_TYPE if needed');
+    console.log('   - Update USD_TO_NGN_RATE if needed\n');
   } else {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🚀 LIVE MODE - REAL PAYMENTS');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    if (CONFIG.NEKPAY_MERCHANT_ID === '300567123') {
-      console.log('⚠️  WARNING: Using default test credentials!');
-      console.log('   Update these for production:');
-      console.log('   - NEKPAY_MERCHANT_ID');
-      console.log('   - NEKPAY_API_KEY');
-      console.log('   - NEKPAY_SECRET_KEY\n');
-    } else {
-      console.log('✓ NEKpay credentials configured');
-      console.log('✓ Ready to process real payments\n');
-    }
+    console.log('✅ Production merchant credentials configured');
+    console.log('✅ Ready to process real payments\n');
   }
-  
+
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-  console.log('📝 Server started successfully. Waiting for requests...\n');
+  console.log('📝 Server ready. Waiting for payment requests...\n');
+
+  console.log('💡 API Endpoints:');
+  console.log('   POST /api/nekpay/create-payment  - Create payment order');
+  console.log('   POST /api/nekpay/query-order     - Query order status');
+  console.log('   POST /api/nekpay/notify          - Payment callback\n');
 });
